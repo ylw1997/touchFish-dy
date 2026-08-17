@@ -85,9 +85,17 @@ struct LiveLibraryView: View {
     @StateObject private var store = LiveLibraryStore()
     @State private var selectedRoom: Aweme?
     private let isActive: Bool
+    private let refreshRevision: Int
+    private let onRefreshRequested: () -> Void
 
-    init(isActive: Bool) {
+    init(
+        isActive: Bool,
+        refreshRevision: Int,
+        onRefreshRequested: @escaping () -> Void
+    ) {
         self.isActive = isActive
+        self.refreshRevision = refreshRevision
+        self.onRefreshRequested = onRefreshRequested
     }
 
     var body: some View {
@@ -119,7 +127,8 @@ struct LiveLibraryView: View {
                     } ?? 0
                     LiveRoomPlaybackPage(
                         rooms: rooms,
-                        initialIndex: initialIndex
+                        initialIndex: initialIndex,
+                        onRefreshRequested: onRefreshRequested
                     )
                 }
             }
@@ -129,6 +138,11 @@ struct LiveLibraryView: View {
             await store.refresh()
         }
         .onChange(of: api.cookieRevision) { _, _ in
+            selectedRoom = nil
+            Task { await store.refresh() }
+        }
+        .onChange(of: refreshRevision) { _, _ in
+            guard isActive else { return }
             selectedRoom = nil
             Task { await store.refresh() }
         }
@@ -181,9 +195,15 @@ private struct LiveRoomPlaybackPage: View {
     @State private var currentIndex: Int
 
     let rooms: [Aweme]
+    let onRefreshRequested: () -> Void
 
-    init(rooms: [Aweme], initialIndex: Int) {
+    init(
+        rooms: [Aweme],
+        initialIndex: Int,
+        onRefreshRequested: @escaping () -> Void
+    ) {
         self.rooms = rooms
+        self.onRefreshRequested = onRefreshRequested
         _currentIndex = State(initialValue: initialIndex)
     }
 
@@ -199,6 +219,7 @@ private struct LiveRoomPlaybackPage: View {
                     coordinator: session,
                     onPrevious: playPrevious,
                     onNext: playNext,
+                    onRefresh: onRefreshRequested,
                     onShowAuthor: showCurrentAuthor
                 )
                 .ignoresSafeArea()

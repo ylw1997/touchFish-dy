@@ -13,9 +13,21 @@ struct DouyinFeedView: View {
     @State private var selectedAuthor: Author?
     @State private var authorPresented = false
     private let isActive: Bool
+    private let refreshRevision: Int
+    private let appEntryRevision: Int
+    private let onRefreshRequested: () -> Void
 
-    init(feedType: FeedType, isActive: Bool) {
+    init(
+        feedType: FeedType,
+        isActive: Bool,
+        refreshRevision: Int,
+        appEntryRevision: Int,
+        onRefreshRequested: @escaping () -> Void
+    ) {
         self.isActive = isActive
+        self.refreshRevision = refreshRevision
+        self.appEntryRevision = appEntryRevision
+        self.onRefreshRequested = onRefreshRequested
         let source: PlaybackSource
         switch feedType {
         case .recommend: source = .recommend
@@ -42,11 +54,9 @@ struct DouyinFeedView: View {
                         coordinator: playbackSession,
                         onPrevious: store.previous,
                         onNext: {
-                            Task {
-                                await store.next()
-                                startPlaybackIfPossible()
-                            }
+                            Task { await store.next() }
                         },
+                        onRefresh: onRefreshRequested,
                         onShowAuthor: showCurrentAuthor
                     )
                     .ignoresSafeArea()
@@ -71,14 +81,22 @@ struct DouyinFeedView: View {
         }
         .task(id: isActive) {
             guard isActive else { return }
-            if store.items.isEmpty {
-                await store.refresh()
-                return
-            }
+            await store.prepareForAppEntry()
             startPlaybackIfPossible()
         }
         .onChange(of: api.cookieRevision) { _, _ in
             Task { await store.refresh() }
+        }
+        .onChange(of: refreshRevision) { _, _ in
+            guard isActive else { return }
+            Task { await store.refresh() }
+        }
+        .onChange(of: appEntryRevision) { _, _ in
+            guard isActive else { return }
+            Task {
+                await store.prepareForAppEntry()
+                startPlaybackIfPossible()
+            }
         }
         .onChange(of: store.playbackToken) { _, _ in
             startPlaybackIfPossible()
@@ -141,6 +159,7 @@ struct DouyinFeedView: View {
             cookie: api.cookie,
             playbackToken: store.playbackToken
         )
+        store.activeItemDidStartPlayback()
         session.prewarm(store.nextItem, cookie: api.cookie)
     }
 

@@ -89,9 +89,17 @@ struct FavoritesLibraryView: View {
     @StateObject private var store = FavoritesLibraryStore()
     @State private var selectedIndex: Int?
     private let isActive: Bool
+    private let refreshRevision: Int
+    private let onRefreshRequested: () -> Void
 
-    init(isActive: Bool) {
+    init(
+        isActive: Bool,
+        refreshRevision: Int,
+        onRefreshRequested: @escaping () -> Void
+    ) {
         self.isActive = isActive
+        self.refreshRevision = refreshRevision
+        self.onRefreshRequested = onRefreshRequested
     }
 
     var body: some View {
@@ -119,7 +127,8 @@ struct FavoritesLibraryView: View {
                     VideoLibraryPlaybackPage(
                         store: store,
                         initialIndex: selectedIndex,
-                        source: .favorites
+                        source: .favorites,
+                        onRefreshRequested: onRefreshRequested
                     )
                 }
             }
@@ -129,6 +138,11 @@ struct FavoritesLibraryView: View {
             await store.refresh()
         }
         .onChange(of: api.cookieRevision) { _, _ in
+            selectedIndex = nil
+            Task { await store.refresh() }
+        }
+        .onChange(of: refreshRevision) { _, _ in
+            guard isActive else { return }
             selectedIndex = nil
             Task { await store.refresh() }
         }
@@ -178,17 +192,20 @@ struct VideoLibraryPlaybackPage<Store: VideoLibraryStore>: View {
     @State private var selectedAuthor: Author?
     @State private var authorPresented = false
     private let allowsAuthorNavigation: Bool
+    private let onRefreshRequested: (() -> Void)?
 
     init(
         store: Store,
         initialIndex: Int,
         source: PlaybackSource,
-        allowsAuthorNavigation: Bool = true
+        allowsAuthorNavigation: Bool = true,
+        onRefreshRequested: (() -> Void)? = nil
     ) {
         self.store = store
         _currentIndex = State(initialValue: initialIndex)
         _playbackSlot = StateObject(wrappedValue: PlaybackSessionSlot(source: source))
         self.allowsAuthorNavigation = allowsAuthorNavigation
+        self.onRefreshRequested = onRefreshRequested
     }
 
     var body: some View {
@@ -203,6 +220,7 @@ struct VideoLibraryPlaybackPage<Store: VideoLibraryStore>: View {
                     coordinator: session,
                     onPrevious: playPrevious,
                     onNext: playNext,
+                    onRefresh: onRefreshRequested,
                     onShowAuthor: allowsAuthorNavigation ? { showCurrentAuthor() } : nil
                 )
                 .ignoresSafeArea()

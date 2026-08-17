@@ -838,7 +838,7 @@ struct LiveRoomEnterData: Decodable {
     let data: [LiveRoom]?
 }
 
-struct Aweme: Decodable, Identifiable, Equatable {
+struct Aweme: Codable, Identifiable, Equatable {
     var id: String { aweme_id }
     let aweme_id: String
     let desc: String?
@@ -867,6 +867,17 @@ struct Aweme: Decodable, Identifiable, Equatable {
         self.statistics = try container.decodeIfPresent(Statistics.self, forKey: .statistics)
         self.aweme_type = try container.decodeIfPresent(Int.self, forKey: .aweme_type)
         self.liveRoom = try container.decodeIfPresent(CellRoomPayload.self, forKey: .cell_room)?.liveRoom
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(aweme_id, forKey: .aweme_id)
+        try container.encodeIfPresent(desc, forKey: .desc)
+        try container.encodeIfPresent(author, forKey: .author)
+        try container.encodeIfPresent(video, forKey: .video)
+        try container.encodeIfPresent(statistics, forKey: .statistics)
+        try container.encodeIfPresent(aweme_type, forKey: .aweme_type)
+        // 推荐快照只保存普通视频；直播房间结构由接口实时解析，不落盘。
     }
 
     init(liveRoom: LiveRoom) {
@@ -976,7 +987,7 @@ struct LiveStreamURL: Decodable {
     let hls_pull_url_map: [String: String]?
 }
 
-struct Author: Decodable {
+struct Author: Codable {
     let sec_uid: String?
     let sec_user_id: String?
     let nickname: String?
@@ -1033,15 +1044,15 @@ struct Author: Decodable {
     }
 }
 
-struct Statistics: Decodable {
+struct Statistics: Codable {
     let digg_count: Int?
 }
 
-struct AvatarUrl: Decodable {
+struct AvatarUrl: Codable {
     let url_list: [String]?
 }
 
-struct Video: Decodable {
+struct Video: Codable {
     let play_addr: VideoAddr?
     let play_addr_h264: VideoAddr?
     let bit_rate: [VideoBitRate]?
@@ -1051,11 +1062,11 @@ struct Video: Decodable {
     let height: Int?
 }
 
-struct VideoAddr: Decodable {
+struct VideoAddr: Codable {
     let url_list: [String]?
 }
 
-struct VideoBitRate: Decodable {
+struct VideoBitRate: Codable {
     let bit_rate: Int?
     let is_h265: Int?
     let play_addr: VideoAddr?

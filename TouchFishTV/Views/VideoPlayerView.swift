@@ -11,6 +11,7 @@ struct VideoPlayerView: View {
     let playbackToken: UInt64
     let onPrevious: () -> Void
     let onNext: () -> Void
+    let onRefresh: (() -> Void)?
     let onShowAuthor: (() -> Void)?
 
     init(
@@ -20,6 +21,7 @@ struct VideoPlayerView: View {
         coordinator: PlaybackCoordinator,
         onPrevious: @escaping () -> Void,
         onNext: @escaping () -> Void,
+        onRefresh: (() -> Void)? = nil,
         onShowAuthor: (() -> Void)? = nil
     ) {
         self.aweme = aweme
@@ -28,6 +30,7 @@ struct VideoPlayerView: View {
         self.coordinator = coordinator
         self.onPrevious = onPrevious
         self.onNext = onNext
+        self.onRefresh = onRefresh
         self.onShowAuthor = onShowAuthor
     }
 
@@ -36,9 +39,11 @@ struct VideoPlayerView: View {
             NativePlayerController(
                 controller: coordinator.playerViewController,
                 isTransitioning: coordinator.isTransitioning,
-                allowsNavigationWhileStopped: coordinator.playbackError != nil,
+                allowsNavigationWhileStopped: coordinator.isTransitioning
+                    || coordinator.playbackError != nil,
                 onPrevious: onPrevious,
                 onNext: onNext,
+                onRefresh: onRefresh,
                 authorName: aweme.displayAuthor?.nickname,
                 onShowAuthor: aweme.displayAuthor?.uid.isEmpty == false ? onShowAuthor : nil,
                 isLive: aweme.isLive,
@@ -64,7 +69,7 @@ struct VideoPlayerView: View {
         .animation(.easeOut(duration: 0.18), value: coordinator.presentationOpacity)
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
             guard let item = notification.object as? AVPlayerItem,
-                  item === coordinator.player.currentItem else { return }
+                  coordinator.shouldAdvanceAfterFinishing(item) else { return }
             onNext()
         }
     }
@@ -74,6 +79,9 @@ final class DouyinPlayerContainerViewController: UIViewController {
     let diagnosticsID = String(UUID().uuidString.prefix(6))
     var onPrevious: (() -> Void)?
     var onNext: (() -> Void)?
+    var onRefresh: (() -> Void)? {
+        didSet { refreshPressRecognizer?.isEnabled = onRefresh != nil }
+    }
     var onShowAuthor: (() -> Void)?
     var onVisible: (() -> Void)?
     var isTransitioning = false
@@ -81,6 +89,7 @@ final class DouyinPlayerContainerViewController: UIViewController {
     let danmakuController = DanmakuOverlayController()
 
     private let playbackController = AVPlayerViewController()
+    private var refreshPressRecognizer: UITapGestureRecognizer?
 
     private var navigationLocked = false
     private var configuredAuthorName: String?
@@ -142,6 +151,16 @@ final class DouyinPlayerContainerViewController: UIViewController {
         playbackController.didMove(toParent: self)
         playbackController.showsPlaybackControls = true
         playbackController.transportBarIncludesTitleView = true
+
+        let refreshPress = UITapGestureRecognizer(
+            target: self,
+            action: #selector(handleRefreshPress)
+        )
+        refreshPress.allowedPressTypes = [NSNumber(value: UIPress.PressType.playPause.rawValue)]
+        refreshPress.cancelsTouchesInView = true
+        refreshPress.isEnabled = onRefresh != nil
+        view.addGestureRecognizer(refreshPress)
+        refreshPressRecognizer = refreshPress
 
         danmakuController.install(in: playbackController)
         NotificationCenter.default.addObserver(
@@ -236,6 +255,16 @@ final class DouyinPlayerContainerViewController: UIViewController {
         )
     }
 
+    @objc private func handleRefreshPress() {
+        guard let onRefresh else { return }
+        PlaybackDiagnostics.shared.event(
+            "remote-refresh",
+            category: "controller",
+            fields: ["controller": diagnosticsID]
+        )
+        onRefresh()
+    }
+
     func requestPlayerFocus() {
         setNeedsFocusUpdate()
         updateFocusIfNeeded()
@@ -297,10 +326,10 @@ final class DouyinPlayerContainerViewController: UIViewController {
     }
 
     private var canNavigateVideos: Bool {
-        guard !isTransitioning, !navigationLocked,
-              let player else { return false }
-        guard player.timeControlStatus == .playing || allowsNavigationWhileStopped else { return false }
-        return true
+        guard !navigationLocked, let player else { return false }
+        // 暂停或当前媒体仍在加载时都允许继续切换。慢直播不能把用户锁在
+        // 黑屏里；新请求会通过 generation 取消旧请求并只接管最后一次选择。
+        return player.currentItem != nil || allowsNavigationWhileStopped
     }
 
     private func isInsidePlayer(_ focusedView: UIView) -> Bool {
@@ -323,6 +352,7 @@ struct NativePlayerController: UIViewControllerRepresentable {
     let allowsNavigationWhileStopped: Bool
     let onPrevious: () -> Void
     let onNext: () -> Void
+    let onRefresh: (() -> Void)?
     let authorName: String?
     let onShowAuthor: (() -> Void)?
     let isLive: Bool
@@ -341,6 +371,7 @@ struct NativePlayerController: UIViewControllerRepresentable {
     private func configure(_ controller: DouyinPlayerContainerViewController) {
         controller.onPrevious = onPrevious
         controller.onNext = onNext
+        controller.onRefresh = onRefresh
         controller.onVisible = onVisible
         controller.configureAuthorAction(
             name: authorName,
@@ -358,6 +389,7 @@ struct NativePlayerController: UIViewControllerRepresentable {
     ) {
         controller.onPrevious = nil
         controller.onNext = nil
+        controller.onRefresh = nil
         controller.onShowAuthor = nil
         controller.onVisible = nil
         controller.transportBarCustomMenuItems = []

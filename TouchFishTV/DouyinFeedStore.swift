@@ -12,6 +12,7 @@ enum FeedNavigation {
 
 @MainActor
 final class DouyinFeedStore: ObservableObject {
+    private static let lastRecommendationKey = "douyin_last_recommendation_v1"
     @Published private(set) var items: [Aweme] = []
     @Published private(set) var activeIndex = 0
     @Published private(set) var playbackToken: UInt64 = 0
@@ -25,13 +26,9 @@ final class DouyinFeedStore: ObservableObject {
     private var recommendRefreshIndex = 1
     private var recommendViewCount = 0
     private var generation: UInt = 0
+    private var paginationTask: Task<Void, Never>?
+    private var paginationGeneration: UInt = 0
     private let retainedPreviousItems = 5
-    private var preloadRemainingItems: Int {
-        // 推荐接口偶尔会连续碰到 15 秒超时，而服务端通常每页只返回约 6 条。
-        // 始终在前方保留约三页，分页波动就不会暴露成切换视频时的冷加载。
-        if case .recommend = feedType { return 17 }
-        return 3
-    }
 
     init(feedType: FeedType, api: DouyinAPI? = nil) {
         self.feedType = feedType
@@ -47,17 +44,46 @@ final class DouyinFeedStore: ObservableObject {
         return items.indices.contains(index) ? items[index] : nil
     }
 
+    /// 每次进入应用时，推荐页先恢复上次成功获取到的最后一条普通视频，
+    /// 同时在后台换取新列表。这样热启动不会停在离开前的播放位置，冷启动
+    /// 也不必等待推荐接口返回后才出现画面。
+    func prepareForAppEntry() async {
+        guard case .recommend = feedType else {
+            if items.isEmpty { await refresh() }
+            return
+        }
+        // 重新进入应用时不沿用离开前的翻页请求；当前入口只恢复缓存首帧，
+        // 随后请求一份新的推荐列表。
+        if paginationTask != nil {
+            cancelPagination()
+            isLoading = false
+        }
+        if let cached = Self.loadLastRecommendation() {
+            items = [cached]
+            activeIndex = 0
+            playbackToken &+= 1
+        }
+        // 前一次进入触发的新列表请求若仍在进行，继续复用它；缓存视频已经
+        // 在上面同步恢复，不需要为了同一批数据再发一条请求。
+        guard !isLoading else { return }
+
+        generation &+= 1
+        cursor = 0
+        hasMore = true
+        recommendRefreshIndex = 1
+        recommendViewCount = 0
+        _ = await load(isRefresh: true, preservingCurrentItem: !items.isEmpty)
+    }
+
     func refresh() async {
+        cancelPagination()
         generation &+= 1
         cursor = 0
         hasMore = true
         recommendRefreshIndex = 1
         recommendViewCount = 0
         isLoading = false
-        let loaded = await load(isRefresh: true)
-        if loaded, case .recommend = feedType {
-            await preloadIfNeeded()
-        }
+        _ = await load(isRefresh: true)
     }
 
     func previous() {
@@ -69,45 +95,53 @@ final class DouyinFeedStore: ObservableObject {
         if let index = FeedNavigation.nextIndex(current: activeIndex, count: items.count) {
             select(index)
             trimPlayedHistoryIfNeeded()
-            await preloadIfNeeded()
             return
         }
 
         let oldCount = items.count
-        _ = await load(isRefresh: false)
-        if items.count > oldCount {
+        if let paginationTask {
+            await paginationTask.value
+        } else {
+            _ = await load(isRefresh: false)
+        }
+        if activeIndex == oldCount - 1, items.count > oldCount {
             select(oldCount)
             trimPlayedHistoryIfNeeded()
         }
     }
 
-    private func preloadIfNeeded() async {
-        let maximumLoads: Int
-        if case .recommend = feedType {
-            // 一次补足三页，并给其中一页留一次后台重试；当前视频会在首屏
-            // 响应后立即播放，不会等待这些后续请求。
-            maximumLoads = 4
-        } else {
-            maximumLoads = 1
-        }
+    func activeItemDidStartPlayback() {
+        scheduleNextPageIfPlayingLastItem()
+    }
 
-        var attempts = 0
-        while items.count - activeIndex - 1 <= preloadRemainingItems,
+    /// 当前页最后一条一开始播放就只请求下一页。列表分页与播放器的
+    /// “当前项 + 下一项”媒体队列互不干扰，也不会为了预热视频连拉多页。
+    private func scheduleNextPageIfPlayingLastItem() {
+        guard activeIndex == items.count - 1,
               hasMore,
-              attempts < maximumLoads {
-            attempts += 1
-            let previousCount = items.count
-            let loaded = await load(isRefresh: false)
-            if !loaded {
-                continue
+              paginationTask == nil else { return }
+        paginationGeneration &+= 1
+        let requestedPaginationGeneration = paginationGeneration
+        paginationTask = Task { [weak self] in
+            guard let self else { return }
+            _ = await self.load(isRefresh: false)
+            if requestedPaginationGeneration == self.paginationGeneration {
+                self.paginationTask = nil
             }
-            // 服务端声称 has_more 但没有给新视频时，避免在一次调用中空转。
-            guard items.count > previousCount else { break }
         }
     }
 
+    private func cancelPagination() {
+        paginationGeneration &+= 1
+        paginationTask?.cancel()
+        paginationTask = nil
+    }
+
     @discardableResult
-    private func load(isRefresh: Bool) async -> Bool {
+    private func load(
+        isRefresh: Bool,
+        preservingCurrentItem: Bool = false
+    ) async -> Bool {
         guard !isLoading, isRefresh || hasMore else { return false }
         let requestGeneration = generation
         isLoading = true
@@ -131,9 +165,14 @@ final class DouyinFeedStore: ObservableObject {
 
             guard requestGeneration == generation else { return false }
             if isRefresh {
-                items = result.0
-                activeIndex = 0
-                playbackToken &+= 1
+                if preservingCurrentItem, let current = activeItem {
+                    items = [current] + result.0.filter { $0.aweme_id != current.aweme_id }
+                    activeIndex = 0
+                } else {
+                    items = result.0
+                    activeIndex = 0
+                    playbackToken &+= 1
+                }
             } else {
                 items.append(contentsOf: result.0)
             }
@@ -142,6 +181,7 @@ final class DouyinFeedStore: ObservableObject {
             if case .recommend = feedType {
                 recommendRefreshIndex += 1
                 recommendViewCount += result.0.count
+                Self.saveLastRecommendation(from: result.0)
             }
             if items.isEmpty { errorMessage = "当前没有可播放的视频" }
             return true
@@ -164,5 +204,19 @@ final class DouyinFeedStore: ObservableObject {
         guard removeCount > 0 else { return }
         items.removeFirst(removeCount)
         activeIndex -= removeCount
+    }
+
+    private static func saveLastRecommendation(from items: [Aweme]) {
+        guard let item = items.last(where: { !$0.isLive && $0.video != nil }),
+              let data = try? JSONEncoder().encode(item) else { return }
+        UserDefaults.standard.set(data, forKey: lastRecommendationKey)
+    }
+
+    private static func loadLastRecommendation() -> Aweme? {
+        guard let data = UserDefaults.standard.data(forKey: lastRecommendationKey),
+              let item = try? JSONDecoder().decode(Aweme.self, from: data),
+              !item.isLive,
+              item.video != nil else { return nil }
+        return item
     }
 }

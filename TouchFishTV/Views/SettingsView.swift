@@ -319,6 +319,8 @@ struct SettingsView: View {
     @State private var showCookieEditor = false
     @State private var showEmergencyCookie = false
     @FocusState private var focusedField: Field?
+    let isActive: Bool
+    let refreshRevision: Int
 
     enum Field: Hashable {
         case qrRefresh
@@ -444,6 +446,16 @@ struct SettingsView: View {
         }
         .onDisappear {
             qrLogin.cancel()
+        }
+        .onChange(of: refreshRevision) { _, _ in
+            guard isActive else { return }
+            inputCookie = api.cookie
+            if api.cookie.isEmpty {
+                qrLogin.start(api: api)
+            } else {
+                qrLogin.showCurrentLogin()
+            }
+            focusedField = .qrRefresh
         }
         .sheet(isPresented: $showCookieEditor) {
             CookieEditorSheet(text: $inputCookie)

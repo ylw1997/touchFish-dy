@@ -140,6 +140,7 @@ final class PlaybackCoordinator: ObservableObject {
     private var prewarmGeneration: UInt = 0
     private var currentPlaybackToken: UInt64?
     private var currentAwemeID: String?
+    private weak var activePlaybackItem: AVPlayerItem?
     private let prewarmProbeSession: URLSession
 #if DEBUG
     private var diagnosticsTask: Task<Void, Never>?
@@ -196,7 +197,6 @@ final class PlaybackCoordinator: ObservableObject {
     func prewarm(_ aweme: Aweme?, cookie: String) {
         guard source == .recommend,
               let aweme,
-              !aweme.isLive,
               aweme.aweme_id != currentAwemeID else {
             cancelPrewarm()
             return
@@ -250,7 +250,7 @@ final class PlaybackCoordinator: ObservableObject {
                     ]
                 )
                 let item = AVPlayerItem(asset: asset)
-                item.preferredForwardBufferDuration = 2
+                item.preferredForwardBufferDuration = aweme.isLive ? 1 : 2
                 item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
                 self.prewarmedAsset = PrewarmedAsset(
                     awemeID: aweme.aweme_id,
@@ -259,7 +259,11 @@ final class PlaybackCoordinator: ObservableObject {
                     item: item,
                     isReady: false
                 )
-                if self.player.canInsert(item, after: self.player.currentItem) {
+                // 普通视频放进同一队列可提前形成少量缓冲。直播只预取 HLS
+                // 清单和轨道信息，不能把持续更新的直播 item 排进队列与当前
+                // 视频争抢带宽和解码资源。
+                if !aweme.isLive,
+                   self.player.canInsert(item, after: self.player.currentItem) {
                     self.player.insert(item, after: self.player.currentItem)
                 }
 #if DEBUG
@@ -375,7 +379,7 @@ final class PlaybackCoordinator: ObservableObject {
         playerViewController.requiresLinearPlayback = aweme.isLive
         // 直播优先尽快出首帧，候选流本身已有启动超时回退；让 AVPlayer
         // 额外等待“足够不发生卡顿”的缓冲会表现为长时间纯黑。
-        player.automaticallyWaitsToMinimizeStalling = false
+        player.automaticallyWaitsToMinimizeStalling = !aweme.isLive
         isTransitioning = true
         presentationOpacity = 0.82
         playbackError = nil
@@ -458,6 +462,12 @@ final class PlaybackCoordinator: ObservableObject {
 #endif
     }
 
+    /// AVQueuePlayer 可能在结束通知到达前已经把 currentItem 推进到预热项，
+    /// 因此结束判断不能依赖 player.currentItem，而要核对本次 Feed 选中的 item。
+    func shouldAdvanceAfterFinishing(_ item: AVPlayerItem) -> Bool {
+        item === activePlaybackItem && playbackArbiter.isActive(self)
+    }
+
     private func loadCandidates(
         _ urls: [URL],
         startingAt startIndex: Int,
@@ -512,22 +522,12 @@ final class PlaybackCoordinator: ObservableObject {
             )
         }
 #endif
-        let preparedItemIsReady = prepared.map {
-            $0.item.status == .readyToPlay
-                && $0.item.presentationSize.width > 0
-                && $0.item.presentationSize.height > 0
-        } ?? false
         let item: AVPlayerItem
-        if let prepared, preparedItemIsReady {
+        if let prepared {
+            // 预热的 AVPlayerItem 自身已经持有队列缓冲和媒体轨道加载状态。
+            // 切换瞬间重新创建 item 会丢掉这些工作，造成“有时秒切、有时重载”。
             item = prepared.item
         } else {
-            if let prepared,
-               player.currentItem !== prepared.item,
-               player.items().contains(where: { $0 === prepared.item }) {
-                // AVQueuePlayer 推进到尚无视频轨道的 item 后，时间可能继续走但
-                // 画面长期不更新。移除这个半成品，只复用已建连的 asset。
-                player.remove(prepared.item)
-            }
             item = AVPlayerItem(asset: asset)
             // Feed 只需要少量前向缓存。旧值 8 秒在渐进式 MP4 上会被系统放大到
             // 一百多秒，当前 item 单独就会长期占用约 50 MB 解码/网络缓冲。
@@ -542,11 +542,11 @@ final class PlaybackCoordinator: ObservableObject {
 
         // 创建好新 item 后一次性替换，避免 currentItem=nil 时原生进度条
         // 短暂显示“禁止播放”图标，也避免把无 await 的工作推迟到下一轮 RunLoop。
+        activePlaybackItem = item
         if player.currentItem === item {
             // 当前视频自然结束时，AVQueuePlayer 可能已经自动推进到预载项；
             // 此时只接管状态与元数据，不能再次 advance 而跳过它。
-        } else if preparedItemIsReady,
-                  player.items().contains(where: { $0 === item }) {
+        } else if player.items().contains(where: { $0 === item }) {
             player.advanceToNextItem()
         } else {
             player.replaceCurrentItem(with: item)
@@ -825,6 +825,7 @@ final class PlaybackCoordinator: ObservableObject {
         playerViewController.onVisible = nil
         currentPlaybackToken = nil
         currentAwemeID = nil
+        activePlaybackItem = nil
         isTransitioning = false
         presentationOpacity = 1
         playbackError = nil
@@ -921,6 +922,7 @@ final class PlaybackCoordinator: ObservableObject {
         item.cancelPendingSeeks()
         item.asset.cancelLoading()
         player.removeAllItems()
+        activePlaybackItem = nil
 #if DEBUG
         diagnosticsEvent(
             "release-current-item-end",
@@ -1025,25 +1027,13 @@ final class PlaybackCoordinator: ObservableObject {
               let endpoint = urls.first(where: isDouyinPlaybackEndpoint) else { return nil }
 
         let session = prewarmProbeSession
-        return await withTaskGroup(of: PlaybackEndpointProbe?.self) { group in
-            for _ in 0..<2 {
-                group.addTask {
-                    await Self.probePlaybackEndpoint(
-                        endpoint,
-                        headers: headers,
-                        session: session
-                    )
-                }
-            }
-
-            for await result in group {
-                if let result {
-                    group.cancelAll()
-                    return result
-                }
-            }
-            return nil
-        }
+        // 同一地址做两次并发 Range 探测偶尔会抢占当前播放和直播启动的
+        // 连接。一次探测已经足够取得最终 CDN 地址，失败仍会走原地址回退。
+        return await Self.probePlaybackEndpoint(
+            endpoint,
+            headers: headers,
+            session: session
+        )
     }
 
     private nonisolated static func probePlaybackEndpoint(
