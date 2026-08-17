@@ -16,18 +16,21 @@ struct DouyinFeedView: View {
     private let refreshRevision: Int
     private let appEntryRevision: Int
     private let onRefreshRequested: () -> Void
+    private let onRefreshCompleted: (Int) -> Void
 
     init(
         feedType: FeedType,
         isActive: Bool,
         refreshRevision: Int,
         appEntryRevision: Int,
-        onRefreshRequested: @escaping () -> Void
+        onRefreshRequested: @escaping () -> Void,
+        onRefreshCompleted: @escaping (Int) -> Void
     ) {
         self.isActive = isActive
         self.refreshRevision = refreshRevision
         self.appEntryRevision = appEntryRevision
         self.onRefreshRequested = onRefreshRequested
+        self.onRefreshCompleted = onRefreshCompleted
         let source: PlaybackSource
         switch feedType {
         case .recommend: source = .recommend
@@ -87,9 +90,12 @@ struct DouyinFeedView: View {
         .onChange(of: api.cookieRevision) { _, _ in
             Task { await store.refresh() }
         }
-        .onChange(of: refreshRevision) { _, _ in
+        .onChange(of: refreshRevision) { _, revision in
             guard isActive else { return }
-            Task { await store.refresh() }
+            Task {
+                await store.refresh()
+                onRefreshCompleted(revision)
+            }
         }
         .onChange(of: appEntryRevision) { _, _ in
             guard isActive else { return }

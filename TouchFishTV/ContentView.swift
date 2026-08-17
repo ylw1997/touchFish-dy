@@ -14,8 +14,7 @@ struct ContentView: View {
     @State private var refreshRevision = 0
     @State private var appEntryRevision = 0
     @State private var lastRefreshTime = Date.distantPast
-    @State private var refreshNotice: String?
-    @State private var refreshNoticeTask: Task<Void, Never>?
+    @State private var isRefreshing = false
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -25,7 +24,8 @@ struct ContentView: View {
                     isActive: selectedTab == .recommend,
                     refreshRevision: refreshRevision,
                     appEntryRevision: appEntryRevision,
-                    onRefreshRequested: refreshSelectedTab
+                    onRefreshRequested: refreshSelectedTab,
+                    onRefreshCompleted: finishRefresh
                 )
                 .tabItem {
                     Label("推荐", systemImage: "sparkles")
@@ -37,7 +37,8 @@ struct ContentView: View {
                 isActive: selectedTab == .following,
                 refreshRevision: refreshRevision,
                 appEntryRevision: appEntryRevision,
-                onRefreshRequested: refreshSelectedTab
+                onRefreshRequested: refreshSelectedTab,
+                onRefreshCompleted: finishRefresh
             )
                 .tabItem {
                     Label("关注", systemImage: "person.2.fill")
@@ -47,7 +48,8 @@ struct ContentView: View {
             LiveLibraryView(
                 isActive: selectedTab == .live,
                 refreshRevision: refreshRevision,
-                onRefreshRequested: refreshSelectedTab
+                onRefreshRequested: refreshSelectedTab,
+                onRefreshCompleted: finishRefresh
             )
                 .tabItem {
                     Label("直播", systemImage: "dot.radiowaves.left.and.right")
@@ -57,7 +59,8 @@ struct ContentView: View {
             FavoritesLibraryView(
                 isActive: selectedTab == .favorites,
                 refreshRevision: refreshRevision,
-                onRefreshRequested: refreshSelectedTab
+                onRefreshRequested: refreshSelectedTab,
+                onRefreshCompleted: finishRefresh
             )
                 .tabItem {
                     Label("我的喜欢", systemImage: "heart.fill")
@@ -66,7 +69,8 @@ struct ContentView: View {
             
             SettingsView(
                 isActive: selectedTab == .settings,
-                refreshRevision: refreshRevision
+                refreshRevision: refreshRevision,
+                onRefreshCompleted: finishRefresh
             )
                 .tabItem {
                     Label("设置", systemImage: "gearshape.fill")
@@ -74,15 +78,14 @@ struct ContentView: View {
                 .tag(DouyinTab.settings)
             }
 
-            if let refreshNotice {
-                Label(refreshNotice, systemImage: "arrow.clockwise")
-                    .font(.headline.weight(.semibold))
+            if isRefreshing {
+                ProgressView("正在刷新…")
+                    .controlSize(.small)
+                    .tint(.white)
+                    .font(.callout.weight(.medium))
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 14)
-                    .background(.black.opacity(0.78), in: Capsule())
-                    .padding(.top, 34)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .padding(.top, 52)
+                    .transition(.opacity)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
@@ -116,33 +119,16 @@ struct ContentView: View {
         guard now.timeIntervalSince(lastRefreshTime) >= 0.25 else { return }
         lastRefreshTime = now
         refreshRevision &+= 1
-        refreshNoticeTask?.cancel()
-        withAnimation(.easeOut(duration: 0.18)) {
-            refreshNotice = "正在刷新\(selectedTab.title)最新内容"
-        }
-        refreshNoticeTask = Task {
-            try? await Task.sleep(for: .seconds(1.5))
-            guard !Task.isCancelled else { return }
-            withAnimation(.easeIn(duration: 0.18)) {
-                refreshNotice = nil
-            }
-        }
+        withAnimation(.easeOut(duration: 0.15)) { isRefreshing = true }
         PlaybackDiagnostics.shared.event(
             "remote-refresh",
             category: "tab",
             fields: ["selected": String(describing: selectedTab)]
         )
     }
-}
 
-private extension DouyinTab {
-    var title: String {
-        switch self {
-        case .recommend: "推荐"
-        case .following: "关注"
-        case .live: "直播"
-        case .favorites: "我的喜欢"
-        case .settings: "设置"
-        }
+    private func finishRefresh(_ completedRevision: Int) {
+        guard completedRevision == refreshRevision else { return }
+        withAnimation(.easeIn(duration: 0.15)) { isRefreshing = false }
     }
 }

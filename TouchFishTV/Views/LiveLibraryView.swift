@@ -87,15 +87,18 @@ struct LiveLibraryView: View {
     private let isActive: Bool
     private let refreshRevision: Int
     private let onRefreshRequested: () -> Void
+    private let onRefreshCompleted: (Int) -> Void
 
     init(
         isActive: Bool,
         refreshRevision: Int,
-        onRefreshRequested: @escaping () -> Void
+        onRefreshRequested: @escaping () -> Void,
+        onRefreshCompleted: @escaping (Int) -> Void
     ) {
         self.isActive = isActive
         self.refreshRevision = refreshRevision
         self.onRefreshRequested = onRefreshRequested
+        self.onRefreshCompleted = onRefreshCompleted
     }
 
     var body: some View {
@@ -141,10 +144,13 @@ struct LiveLibraryView: View {
             selectedRoom = nil
             Task { await store.refresh() }
         }
-        .onChange(of: refreshRevision) { _, _ in
+        .onChange(of: refreshRevision) { _, revision in
             guard isActive else { return }
             selectedRoom = nil
-            Task { await store.refresh() }
+            Task {
+                await store.refresh()
+                onRefreshCompleted(revision)
+            }
         }
         .onChange(of: isActive) { _, active in
             if !active { selectedRoom = nil }

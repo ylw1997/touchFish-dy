@@ -321,6 +321,7 @@ struct SettingsView: View {
     @FocusState private var focusedField: Field?
     let isActive: Bool
     let refreshRevision: Int
+    let onRefreshCompleted: (Int) -> Void
 
     enum Field: Hashable {
         case qrRefresh
@@ -447,7 +448,7 @@ struct SettingsView: View {
         .onDisappear {
             qrLogin.cancel()
         }
-        .onChange(of: refreshRevision) { _, _ in
+        .onChange(of: refreshRevision) { _, revision in
             guard isActive else { return }
             inputCookie = api.cookie
             if api.cookie.isEmpty {
@@ -456,6 +457,7 @@ struct SettingsView: View {
                 qrLogin.showCurrentLogin()
             }
             focusedField = .qrRefresh
+            onRefreshCompleted(revision)
         }
         .sheet(isPresented: $showCookieEditor) {
             CookieEditorSheet(text: $inputCookie)
