@@ -14,16 +14,19 @@ struct ContentView: View {
     @State private var refreshRevision = 0
     @State private var appEntryRevision = 0
     @State private var lastRefreshTime = Date.distantPast
+    @State private var refreshNotice: String?
+    @State private var refreshNoticeTask: Task<Void, Never>?
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            DouyinFeedView(
-                feedType: .recommend,
-                isActive: selectedTab == .recommend,
-                refreshRevision: refreshRevision,
-                appEntryRevision: appEntryRevision,
-                onRefreshRequested: refreshSelectedTab
-            )
+        ZStack(alignment: .top) {
+            TabView(selection: $selectedTab) {
+                DouyinFeedView(
+                    feedType: .recommend,
+                    isActive: selectedTab == .recommend,
+                    refreshRevision: refreshRevision,
+                    appEntryRevision: appEntryRevision,
+                    onRefreshRequested: refreshSelectedTab
+                )
                 .tabItem {
                     Label("推荐", systemImage: "sparkles")
                 }
@@ -69,6 +72,20 @@ struct ContentView: View {
                     Label("设置", systemImage: "gearshape.fill")
                 }
                 .tag(DouyinTab.settings)
+            }
+
+            if let refreshNotice {
+                Label(refreshNotice, systemImage: "arrow.clockwise")
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 14)
+                    .background(.black.opacity(0.78), in: Capsule())
+                    .padding(.top, 34)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
         }
         .onPlayPauseCommand(perform: refreshSelectedTab)
         .onAppear {
@@ -99,10 +116,33 @@ struct ContentView: View {
         guard now.timeIntervalSince(lastRefreshTime) >= 0.25 else { return }
         lastRefreshTime = now
         refreshRevision &+= 1
+        refreshNoticeTask?.cancel()
+        withAnimation(.easeOut(duration: 0.18)) {
+            refreshNotice = "正在刷新\(selectedTab.title)最新内容"
+        }
+        refreshNoticeTask = Task {
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeIn(duration: 0.18)) {
+                refreshNotice = nil
+            }
+        }
         PlaybackDiagnostics.shared.event(
             "remote-refresh",
             category: "tab",
             fields: ["selected": String(describing: selectedTab)]
         )
+    }
+}
+
+private extension DouyinTab {
+    var title: String {
+        switch self {
+        case .recommend: "推荐"
+        case .following: "关注"
+        case .live: "直播"
+        case .favorites: "我的喜欢"
+        case .settings: "设置"
+        }
     }
 }

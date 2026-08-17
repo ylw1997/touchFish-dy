@@ -159,7 +159,9 @@ final class DouyinPlayerContainerViewController: UIViewController {
         refreshPress.allowedPressTypes = [NSNumber(value: UIPress.PressType.playPause.rawValue)]
         refreshPress.cancelsTouchesInView = true
         refreshPress.isEnabled = onRefresh != nil
-        view.addGestureRecognizer(refreshPress)
+        // AVPlayerViewController 会优先消费播放/暂停按键。识别器必须直接
+        // 安装在它的视图上，放在外层容器时部分焦点状态收不到该按键。
+        playbackController.view.addGestureRecognizer(refreshPress)
         refreshPressRecognizer = refreshPress
 
         danmakuController.install(in: playbackController)
@@ -263,6 +265,16 @@ final class DouyinPlayerContainerViewController: UIViewController {
             fields: ["controller": diagnosticsID]
         )
         onRefresh()
+    }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        // 非 AVKit 焦点落在容器自身时的兜底；与手势同时触发也会被根视图的
+        // 250ms 防抖合并成一次刷新请求。
+        if presses.contains(where: { $0.type == .playPause }), onRefresh != nil {
+            handleRefreshPress()
+            return
+        }
+        super.pressesBegan(presses, with: event)
     }
 
     func requestPlayerFocus() {

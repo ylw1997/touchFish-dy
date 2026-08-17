@@ -80,8 +80,8 @@ final class DouyinFeedStore: ObservableObject {
         generation &+= 1
         cursor = 0
         hasMore = true
-        recommendRefreshIndex = 1
-        recommendViewCount = 0
+        // 手动刷新继续使用递增的推荐刷新序号，让服务端返回下一批最新推荐；
+        // 只有重新进入应用时才从一套新的推荐会话上下文开始。
         isLoading = false
         _ = await load(isRefresh: true)
     }
