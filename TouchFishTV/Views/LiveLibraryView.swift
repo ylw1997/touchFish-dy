@@ -258,6 +258,9 @@ private struct LiveRoomPlaybackPage: View {
                 AuthorWorksView(author: selectedAuthor)
             }
         }
+        // 直播观看是全屏层。隐藏 Tab 后，上下键不会把焦点移到 TabView；
+        // 返回弹出本页时，直播列表作为上一层会自动恢复 Tab。
+        .toolbar(.hidden, for: .tabBar)
         .onExitCommand { dismiss() }
         .onDisappear { playbackSlot.deactivate() }
     }
@@ -272,8 +275,6 @@ private struct LiveRoomPlaybackPage: View {
             return
         }
 
-        playbackSlot.deactivate()
-        playbackItem = nil
         errorMessage = nil
         isLoading = true
         defer {
