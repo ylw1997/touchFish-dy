@@ -48,6 +48,11 @@ struct VideoPlayerView: View {
                 onShowAuthor: aweme.displayAuthor?.uid.isEmpty == false ? onShowAuthor : nil,
                 isLive: aweme.isLive,
                 danmakuAvailable: true,
+                qualityOptions: coordinator.qualityOptions,
+                selectedQualityID: coordinator.selectedQualityID,
+                onSelectQuality: { [weak coordinator] qualityID in
+                    coordinator?.selectQuality(qualityID)
+                },
                 onVisible: { [weak coordinator] in coordinator?.resume() }
             )
 
@@ -83,6 +88,7 @@ final class DouyinPlayerContainerViewController: UIViewController {
         didSet { refreshPressRecognizer?.isEnabled = onRefresh != nil }
     }
     var onShowAuthor: (() -> Void)?
+    var onSelectQuality: ((String) -> Void)?
     var onVisible: (() -> Void)?
     var isTransitioning = false
     var allowsNavigationWhileStopped = false
@@ -97,6 +103,8 @@ final class DouyinPlayerContainerViewController: UIViewController {
     private var configuredIsLive: Bool?
     private var configuredDanmakuEnabled: Bool?
     private var configuredDanmakuAvailable = true
+    private var configuredQualityOptions: [PlaybackQualityOption] = []
+    private var configuredSelectedQualityID = "auto"
 
     private enum NavigationDirection {
         case previous
@@ -177,9 +185,13 @@ final class DouyinPlayerContainerViewController: UIViewController {
         name: String?,
         action: (() -> Void)?,
         isLive: Bool,
-        danmakuAvailable: Bool
+        danmakuAvailable: Bool,
+        qualityOptions: [PlaybackQualityOption],
+        selectedQualityID: String,
+        onSelectQuality: ((String) -> Void)?
     ) {
         onShowAuthor = action
+        self.onSelectQuality = onSelectQuality
         if isLive {
             // 部分直播 HLS 自带字幕轨，AVKit 会额外生成气泡按钮。
             // 关闭系统字幕轨；直播弹幕由 WebSocket 覆盖层提供。
@@ -196,6 +208,8 @@ final class DouyinPlayerContainerViewController: UIViewController {
                 || configuredIsLive != isLive
                 || configuredDanmakuEnabled != danmakuEnabled
                 || configuredDanmakuAvailable != danmakuAvailable
+                || configuredQualityOptions != qualityOptions
+                || configuredSelectedQualityID != selectedQualityID
                 || transportBarCustomMenuItems.isEmpty else {
             return
         }
@@ -205,6 +219,8 @@ final class DouyinPlayerContainerViewController: UIViewController {
         configuredIsLive = isLive
         configuredDanmakuEnabled = danmakuEnabled
         configuredDanmakuAvailable = danmakuAvailable
+        configuredQualityOptions = qualityOptions
+        configuredSelectedQualityID = selectedQualityID
         rebuildTransportBarActions()
     }
 
@@ -232,6 +248,31 @@ final class DouyinPlayerContainerViewController: UIViewController {
                 self.rebuildTransportBarActions()
             }
             actions.append(danmakuAction)
+        }
+        if configuredQualityOptions.count > 1 {
+            let qualityActions = configuredQualityOptions.map { option in
+                UIAction(
+                    title: option.title,
+                    state: option.id == configuredSelectedQualityID ? .on : .off
+                ) { [weak self] _ in
+                    guard let self else { return }
+                    self.configuredSelectedQualityID = option.id
+                    self.rebuildTransportBarActions()
+                    self.onSelectQuality?(option.id)
+                }
+            }
+            let qualitySubmenu = UIMenu(
+                title: "清晰度",
+                options: [.displayInline, .singleSelection],
+                children: qualityActions
+            )
+            actions.append(
+                UIMenu(
+                    title: "清晰度",
+                    image: UIImage(systemName: "gearshape"),
+                    children: [qualitySubmenu]
+                )
+            )
         }
         transportBarCustomMenuItems = actions
     }
@@ -368,6 +409,9 @@ struct NativePlayerController: UIViewControllerRepresentable {
     let onShowAuthor: (() -> Void)?
     let isLive: Bool
     let danmakuAvailable: Bool
+    let qualityOptions: [PlaybackQualityOption]
+    let selectedQualityID: String
+    let onSelectQuality: (String) -> Void
     let onVisible: () -> Void
 
     func makeUIViewController(context: Context) -> DouyinPlayerContainerViewController {
@@ -388,7 +432,10 @@ struct NativePlayerController: UIViewControllerRepresentable {
             name: authorName,
             action: onShowAuthor,
             isLive: isLive,
-            danmakuAvailable: danmakuAvailable
+            danmakuAvailable: danmakuAvailable,
+            qualityOptions: qualityOptions,
+            selectedQualityID: selectedQualityID,
+            onSelectQuality: onSelectQuality
         )
         controller.isTransitioning = isTransitioning
         controller.allowsNavigationWhileStopped = allowsNavigationWhileStopped
@@ -402,6 +449,7 @@ struct NativePlayerController: UIViewControllerRepresentable {
         controller.onNext = nil
         controller.onRefresh = nil
         controller.onShowAuthor = nil
+        controller.onSelectQuality = nil
         controller.onVisible = nil
         controller.transportBarCustomMenuItems = []
         controller.danmakuController.stop()

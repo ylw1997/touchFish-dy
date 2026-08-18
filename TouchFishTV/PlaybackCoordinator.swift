@@ -1,6 +1,12 @@
 import AVFoundation
 import Foundation
 
+struct PlaybackQualityOption: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let urls: [URL]
+}
+
 enum PlaybackSource: String {
     case recommend
     case following
@@ -126,6 +132,8 @@ final class PlaybackCoordinator: ObservableObject {
     @Published private(set) var isTransitioning = false
     @Published private(set) var presentationOpacity = 1.0
     @Published private(set) var playbackError: String?
+    @Published private(set) var qualityOptions: [PlaybackQualityOption] = []
+    @Published private(set) var selectedQualityID = "auto"
 
     private let instanceID = String(UUID().uuidString.prefix(6))
     private let playerID = String(UUID().uuidString.prefix(6))
@@ -140,7 +148,11 @@ final class PlaybackCoordinator: ObservableObject {
     private var prewarmGeneration: UInt = 0
     private var currentPlaybackToken: UInt64?
     private var currentAwemeID: String?
+    private var currentAweme: Aweme?
+    private var currentCookie = ""
     private weak var activePlaybackItem: AVPlayerItem?
+    private var pendingQualitySeekTime: CMTime?
+    private var pendingQualityShouldResume = false
     private let prewarmProbeSession: URLSession
 #if DEBUG
     private var diagnosticsTask: Task<Void, Never>?
@@ -391,6 +403,19 @@ final class PlaybackCoordinator: ObservableObject {
         }
         currentPlaybackToken = playbackToken
         currentAwemeID = aweme.aweme_id
+        currentAweme = aweme
+        currentCookie = cookie
+        qualityOptions = makeQualityOptions(for: aweme)
+        selectedQualityID = "auto"
+        pendingQualitySeekTime = nil
+        pendingQualityShouldResume = false
+#if DEBUG
+        diagnosticsEvent(
+            "quality-options",
+            category: "item",
+            fields: ["values": qualityOptions.map(\.title).joined(separator: ",")]
+        )
+#endif
         if aweme.isLive,
            let room = aweme.liveRoom,
            let webRID = room.webRID ?? room.owner?.web_rid,
@@ -471,6 +496,41 @@ final class PlaybackCoordinator: ObservableObject {
 #if DEBUG
         diagnosticsEvent("resume", category: "session")
 #endif
+    }
+
+    func selectQuality(_ qualityID: String) {
+        guard qualityID != selectedQualityID,
+              let aweme = currentAweme,
+              let option = qualityOptions.first(where: { $0.id == qualityID }),
+              !option.urls.isEmpty,
+              playbackArbiter.isActive(self) else { return }
+
+        let resumeTime = player.currentTime()
+        let shouldResume = player.timeControlStatus == .playing || player.rate > 0
+        selectedQualityID = qualityID
+        generation &+= 1
+        let requestedGeneration = generation
+        cancelPendingLoad()
+        prepareCurrentItemForReplacement()
+        playbackError = nil
+        isTransitioning = true
+        presentationOpacity = 0.82
+        pendingQualitySeekTime = aweme.isLive || !resumeTime.isNumeric ? nil : resumeTime
+        pendingQualityShouldResume = shouldResume
+#if DEBUG
+        diagnosticsEvent(
+            "quality-selected",
+            category: "item",
+            fields: ["quality": option.title, "live": aweme.isLive]
+        )
+#endif
+        loadCandidates(
+            option.urls,
+            startingAt: 0,
+            aweme: aweme,
+            cookie: currentCookie,
+            requestedGeneration: requestedGeneration
+        )
     }
 
     /// AVQueuePlayer 可能在结束通知到达前已经把 currentItem 推进到预热项，
@@ -572,7 +632,7 @@ final class PlaybackCoordinator: ObservableObject {
         )
         if aweme.isLive {
             player.playImmediately(atRate: 1)
-        } else {
+        } else if pendingQualitySeekTime == nil {
             player.play()
         }
         if aweme.isLive {
@@ -719,6 +779,19 @@ final class PlaybackCoordinator: ObservableObject {
         item.externalMetadata = metadata(for: aweme)
         if aweme.isLive {
             player.playImmediately(atRate: 1)
+        } else if let seekTime = pendingQualitySeekTime {
+            let shouldResume = pendingQualityShouldResume
+            pendingQualitySeekTime = nil
+            pendingQualityShouldResume = false
+            player.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+                guard shouldResume else { return }
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          self.generation == requestedGeneration,
+                          self.player.currentItem === self.activePlaybackItem else { return }
+                    self.player.play()
+                }
+            }
         }
 #if DEBUG
         diagnosticsEvent(
@@ -836,6 +909,12 @@ final class PlaybackCoordinator: ObservableObject {
         playerViewController.onVisible = nil
         currentPlaybackToken = nil
         currentAwemeID = nil
+        currentAweme = nil
+        currentCookie = ""
+        qualityOptions = []
+        selectedQualityID = "auto"
+        pendingQualitySeekTime = nil
+        pendingQualityShouldResume = false
         activePlaybackItem = nil
         isTransitioning = false
         presentationOpacity = 1
@@ -966,6 +1045,114 @@ final class PlaybackCoordinator: ObservableObject {
             fields: ["itemStatus": debugItemStatus(item.status)]
         )
 #endif
+    }
+
+    private func makeQualityOptions(for aweme: Aweme) -> [PlaybackQualityOption] {
+        let automaticURLs = preferredURLs(for: aweme)
+        guard !automaticURLs.isEmpty else { return [] }
+        var options = [PlaybackQualityOption(id: "auto", title: "自动", urls: automaticURLs)]
+
+        if let room = aweme.liveRoom, room.isOnline {
+            let map = room.stream_url?.hls_pull_url_map ?? [:]
+            let levels = [
+                ("FULL_HD1", "原画"),
+                ("HD1", "超清"),
+                ("SD2", "高清"),
+                ("SD1", "标清")
+            ]
+            var seen = Set<String>()
+            for (key, title) in levels {
+                guard let value = map[key], let url = URL(string: value),
+                      seen.insert(url.absoluteString).inserted else { continue }
+                options.append(PlaybackQualityOption(id: "live-\(key)", title: title, urls: [url]))
+            }
+            if !options.contains(where: { $0.title == "原画" }),
+               let value = room.stream_url?.hls_pull_url,
+               let url = URL(string: value) {
+                options.insert(
+                    PlaybackQualityOption(id: "live-original", title: "原画", urls: [url]),
+                    at: 1
+                )
+            }
+            return options
+        }
+
+        guard let video = aweme.video else { return options }
+        let allRates = video.bit_rate ?? []
+        let h264Rates = allRates.filter { $0.is_h265 != 1 }
+        let rates = (h264Rates.isEmpty ? allRates : h264Rates)
+            .sorted { ($0.bit_rate ?? 0) > ($1.bit_rate ?? 0) }
+        let labeledRates: [(rate: VideoBitRate, title: String)]
+        if rates.contains(where: { resolutionTitle(for: $0) != nil }) {
+            labeledRates = rates.compactMap { rate in
+                resolutionTitle(for: rate).map { (rate, $0) }
+            }.sorted { qualityRank($0.title) > qualityRank($1.title) }
+        } else {
+            let representatives = [
+                (rates.indices.first, "最高"),
+                (rates.isEmpty ? nil : rates.count / 2, "标准"),
+                (rates.indices.last, "流畅")
+            ]
+            var seenIndexes = Set<Int>()
+            labeledRates = representatives.compactMap { index, title in
+                guard let index, rates.indices.contains(index), seenIndexes.insert(index).inserted else {
+                    return nil
+                }
+                return (rates[index], title)
+            }
+        }
+        var optionIndexByTitle: [String: Int] = [:]
+        for (rate, title) in labeledRates {
+            var seenURLs = Set<String>()
+            let rawURLs = (rate.play_addr?.url_list ?? [])
+                .compactMap(URL.init(string:))
+                .filter {
+                    !isClearlyAudioOnlyURL($0) && seenURLs.insert($0.absoluteString).inserted
+                }
+            let directURLs = rawURLs
+                .filter { !isDouyinPlaybackEndpoint($0) && !isPrimeCDN($0) }
+                .sorted { score($0) > score($1) }
+            let playbackEndpoints = rawURLs
+                .filter(isDouyinPlaybackEndpoint)
+                .sorted { score($0) > score($1) }
+            let urls = Array(directURLs.prefix(2)) + Array(playbackEndpoints.prefix(2))
+            guard !urls.isEmpty else { continue }
+            if let index = optionIndexByTitle[title] {
+                var merged = options[index].urls
+                var seen = Set(merged.map(\.absoluteString))
+                merged.append(contentsOf: urls.filter { seen.insert($0.absoluteString).inserted })
+                options[index] = PlaybackQualityOption(
+                    id: options[index].id,
+                    title: title,
+                    urls: merged
+                )
+            } else {
+                let index = options.count
+                optionIndexByTitle[title] = index
+                options.append(
+                    PlaybackQualityOption(id: "vod-\(index)", title: title, urls: urls)
+                )
+            }
+        }
+        return options
+    }
+
+    private func resolutionTitle(for rate: VideoBitRate) -> String? {
+        let gear = rate.gear_name?.lowercased() ?? ""
+        if gear.contains("4k") || gear.contains("2160") { return "4K" }
+        if gear.contains("2k") || gear.contains("1440") { return "2K" }
+        for height in [1080, 720, 540, 480, 360] where gear.contains(String(height)) {
+            return "\(height)P"
+        }
+        return nil
+    }
+
+    private func qualityRank(_ title: String) -> Int {
+        switch title {
+        case "4K": return 2160
+        case "2K": return 1440
+        default: return Int(title.dropLast()) ?? 0
+        }
     }
 
     private func preferredURLs(for aweme: Aweme) -> [URL] {

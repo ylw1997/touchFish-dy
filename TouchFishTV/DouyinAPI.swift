@@ -1087,17 +1087,20 @@ struct VideoAddr: Codable {
 struct VideoBitRate: Codable {
     let bit_rate: Int?
     let is_h265: Int?
+    let gear_name: String?
     let play_addr: VideoAddr?
 
     private enum CodingKeys: String, CodingKey {
         case bit_rate
         case is_h265
+        case gear_name
         case play_addr
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         bit_rate = try container.decodeIfPresent(Int.self, forKey: .bit_rate)
+        gear_name = try container.decodeIfPresent(String.self, forKey: .gear_name)
         play_addr = try container.decodeIfPresent(VideoAddr.self, forKey: .play_addr)
         if let value = try? container.decode(Int.self, forKey: .is_h265) {
             is_h265 = value
