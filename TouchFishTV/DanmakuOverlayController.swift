@@ -6,6 +6,7 @@ final class DanmakuOverlayController {
     private static let enabledDefaultsKey = "douyin_danmaku_enabled"
     private let overlayView = UIView()
     private let service = DanmakuService()
+    private let liveService = LiveDanmakuService()
     private weak var player: AVPlayer?
     private var aweme: Aweme?
     private var cookie = ""
@@ -13,6 +14,7 @@ final class DanmakuOverlayController {
     private var playbackObservation: NSKeyValueObservation?
     private var rateObservation: NSKeyValueObservation?
     private var playbackToken: UInt64?
+    private var liveContext: (roomID: String, webRID: String)?
     private var fetchTasks: [Int: Task<Void, Never>] = [:]
     private var loadedWindows: Set<Int> = []
     private var pending: [DanmakuItem] = []
@@ -20,6 +22,7 @@ final class DanmakuOverlayController {
     private var trackAvailableAt: [Double] = []
     private var lastTime = 0.0
     private var animationsPaused = false
+    private var isRuntimeActive = false
 
     var isEnabled: Bool {
         if UserDefaults.standard.object(forKey: Self.enabledDefaultsKey) == nil { return true }
@@ -48,11 +51,11 @@ final class DanmakuOverlayController {
 
     func configure(aweme: Aweme, player: AVPlayer, cookie: String, playbackToken: UInt64) {
         let changed = self.playbackToken != playbackToken || self.player !== player
-        self.cookie = cookie
         guard changed else { return }
         stop()
         self.aweme = aweme
         self.player = player
+        self.cookie = cookie
         self.playbackToken = playbackToken
         overlayView.isHidden = !isEnabled
         PlaybackDiagnostics.shared.event(
@@ -60,6 +63,25 @@ final class DanmakuOverlayController {
             category: "danmaku",
             fields: ["aweme": aweme.aweme_id, "token": playbackToken]
         )
+        guard isEnabled else { return }
+        startRuntime()
+    }
+
+    func configureLive(
+        roomID: String,
+        webRID: String,
+        player: AVPlayer,
+        cookie: String,
+        playbackToken: UInt64
+    ) {
+        let changed = self.playbackToken != playbackToken || self.player !== player
+        guard changed else { return }
+        stop()
+        self.player = player
+        self.cookie = cookie
+        self.playbackToken = playbackToken
+        liveContext = (roomID, webRID)
+        overlayView.isHidden = !isEnabled
         guard isEnabled else { return }
         startRuntime()
     }
@@ -90,7 +112,8 @@ final class DanmakuOverlayController {
     }
 
     private func startRuntime() {
-        guard isEnabled, timeObserver == nil, let player, aweme != nil, playbackToken != nil else { return }
+        guard isEnabled, !isRuntimeActive, let player, playbackToken != nil else { return }
+        isRuntimeActive = true
         playbackObservation = player.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
             Task { @MainActor in
                 self?.synchronizeAnimationState(with: player)
@@ -101,8 +124,17 @@ final class DanmakuOverlayController {
                 self?.synchronizeAnimationState(with: player)
             }
         }
-        installTimeObserver()
-        loadWindow(start: 0)
+        if let liveContext {
+            liveService.onDanmaku = { [weak self] item in self?.displayLive(item) }
+            liveService.start(
+                roomID: liveContext.roomID,
+                webRID: liveContext.webRID,
+                cookie: cookie
+            )
+        } else if aweme != nil {
+            installTimeObserver()
+            loadWindow(start: 0)
+        }
     }
 
     func stop() {
@@ -123,6 +155,7 @@ final class DanmakuOverlayController {
         aweme = nil
         player = nil
         playbackToken = nil
+        liveContext = nil
         cookie = ""
     }
 
@@ -133,6 +166,9 @@ final class DanmakuOverlayController {
         playbackObservation = nil
         rateObservation?.invalidate()
         rateObservation = nil
+        liveService.stop()
+        liveService.onDanmaku = nil
+        isRuntimeActive = false
         fetchTasks.values.forEach { $0.cancel() }
         fetchTasks.removeAll()
         loadedWindows.removeAll()
@@ -219,6 +255,7 @@ final class DanmakuOverlayController {
                         "errorType": String(describing: type(of: error))
                     ]
                 )
+                if !(error is CancellationError) { self?.loadedWindows.remove(start) }
             }
             self?.fetchTasks[start] = nil
         }
@@ -233,10 +270,20 @@ final class DanmakuOverlayController {
     private func display(_ item: DanmakuItem, at milliseconds: Int) {
         guard let player, isPlayingAtNormalRate(player),
               overlayView.bounds.width > 0, overlayView.bounds.height > 0 else { return }
-        displayedIDs.insert(item.id)
+        displayText(id: item.id, text: item.text, at: milliseconds)
+    }
+
+    private func displayLive(_ item: LiveDanmakuItem) {
+        guard let player, isPlayingAtNormalRate(player),
+              overlayView.bounds.width > 0, overlayView.bounds.height > 0 else { return }
+        let text = item.nickname.isEmpty ? item.text : "\(item.nickname)：\(item.text)"
+        displayText(id: item.id, text: text, at: Int(CACurrentMediaTime() * 1_000))
+    }
+
+    private func displayText(id: String, text: String, at milliseconds: Int) {
         let font = UIFont.systemFont(ofSize: max(28, min(38, overlayView.bounds.height * 0.14)), weight: .semibold)
         let label = StrokeLabel()
-        label.text = item.text
+        label.text = text
         label.font = font
         label.textColor = UIColor.white.withAlphaComponent(0.88)
         label.lineBreakMode = .byTruncatingTail
@@ -250,6 +297,7 @@ final class DanmakuOverlayController {
         guard let track = trackAvailableAt.enumerated().min(by: { $0.element < $1.element })?.offset,
               trackAvailableAt[track] <= Double(milliseconds) else { return }
 
+        if liveContext == nil { displayedIDs.insert(id) }
         label.frame.origin = CGPoint(x: overlayView.bounds.width, y: CGFloat(track) * rowHeight + 4)
         overlayView.addSubview(label)
         let distance = overlayView.bounds.width + label.bounds.width

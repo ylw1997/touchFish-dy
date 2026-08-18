@@ -1,5 +1,6 @@
 import Foundation
 import JavaScriptCore
+import CryptoKit
 
 class SignatureManager {
     static let shared = SignatureManager()
@@ -34,34 +35,41 @@ class SignatureManager {
     }
 
     func sign(url: String, userAgent: String) -> String {
-        guard let context = context else {
+        guard context != nil else {
             print("[SignatureManager] JSContext is nil, returning unsigned URL")
-            return url
-        }
-        
-        let module = context.objectForKeyedSubscript("module")
-        let exports = module?.objectForKeyedSubscript("exports")
-        
-        guard let signFunction = exports, !signFunction.isUndefined else {
-            print("[SignatureManager] xbogus sign function is undefined")
             return url
         }
         
         // Bundle 内是 xbogus 的算法本体；npm 入口会先截取 query，再调用这个函数。
         // 因此这里必须保持相同契约，只传入问号后的查询参数。
         let query = url.range(of: "?").map { String(url[$0.upperBound...]) } ?? ""
-        guard !query.isEmpty,
-              let signedValVal = signFunction.call(withArguments: [query, userAgent]) else {
-            print("[SignatureManager] Calling sign function failed")
-            return url
-        }
-        
-        let signedValue = signedValVal.toString() ?? ""
+        let signedValue = sign(value: query, userAgent: userAgent)
         if signedValue.isEmpty {
             return url
         }
         
         let separator = url.contains("?") ? "&" : "?"
         return "\(url)\(separator)X-Bogus=\(signedValue)"
+    }
+
+    func liveSignature(roomID: String, userUniqueID: String, userAgent: String) -> String {
+        let source = "live_id=1,aid=6383,version_code=180800,webcast_sdk_version=1.0.15,room_id=\(roomID),sub_room_id=,sub_channel_id=,did_rule=3,user_unique_id=\(userUniqueID),device_platform=web,device_type=,ac=,identity=audience"
+        let digest = Insecure.MD5.hash(data: Data(source.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return sign(value: digest, userAgent: userAgent)
+    }
+
+    private func sign(value: String, userAgent: String) -> String {
+        guard !value.isEmpty,
+              let context,
+              let signFunction = context.objectForKeyedSubscript("module")?
+                .objectForKeyedSubscript("exports"),
+              !signFunction.isUndefined,
+              let result = signFunction.call(withArguments: [value, userAgent]) else {
+            print("[SignatureManager] Calling sign function failed")
+            return ""
+        }
+        return result.toString() ?? ""
     }
 }

@@ -47,7 +47,7 @@ struct VideoPlayerView: View {
                 authorName: aweme.displayAuthor?.nickname,
                 onShowAuthor: aweme.displayAuthor?.uid.isEmpty == false ? onShowAuthor : nil,
                 isLive: aweme.isLive,
-                danmakuAvailable: !aweme.isLive,
+                danmakuAvailable: true,
                 onVisible: { [weak coordinator] in coordinator?.resume() }
             )
 
@@ -181,14 +181,13 @@ final class DouyinPlayerContainerViewController: UIViewController {
     ) {
         onShowAuthor = action
         if isLive {
-            danmakuController.stop()
             // 部分直播 HLS 自带字幕轨，AVKit 会额外生成气泡按钮。
-            // 直播页不提供字幕或弹幕入口，只保留用户操作。
+            // 关闭系统字幕轨；直播弹幕由 WebSocket 覆盖层提供。
             playbackController.allowedSubtitleOptionLanguages = []
         } else {
             playbackController.allowedSubtitleOptionLanguages = nil
-            if danmakuAvailable { danmakuController.synchronizePreference() }
         }
+        if danmakuAvailable { danmakuController.synchronizePreference() }
         let normalizedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasAuthorAction = action != nil
         let danmakuEnabled = danmakuController.isEnabled
@@ -221,7 +220,7 @@ final class DouyinPlayerContainerViewController: UIViewController {
             actions.append(userAction)
         }
 
-        if configuredDanmakuAvailable, configuredIsLive != true {
+        if configuredDanmakuAvailable {
             let danmakuEnabled = danmakuController.isEnabled
             configuredDanmakuEnabled = danmakuEnabled
             let danmakuAction = UIAction(

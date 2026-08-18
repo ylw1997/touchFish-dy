@@ -391,7 +391,18 @@ final class PlaybackCoordinator: ObservableObject {
         }
         currentPlaybackToken = playbackToken
         currentAwemeID = aweme.aweme_id
-        if !aweme.isLive {
+        if aweme.isLive,
+           let room = aweme.liveRoom,
+           let webRID = room.owner?.web_rid,
+           !webRID.isEmpty {
+            playerViewController.danmakuController.configureLive(
+                roomID: room.id_str,
+                webRID: webRID,
+                player: player,
+                cookie: cookie,
+                playbackToken: playbackToken
+            )
+        } else if !aweme.isLive {
             playerViewController.danmakuController.configure(
                 aweme: aweme,
                 player: player,
