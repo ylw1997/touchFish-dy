@@ -650,7 +650,7 @@ final class DouyinAPI: ObservableObject {
             ]
         )
 #endif
-        return room
+        return room.withWebRID(webRID)
     }
 
     /// 获取当前账号已喜欢的视频，只读展示，不执行点赞或取消点赞。
@@ -925,6 +925,7 @@ struct LiveRoom: Decodable {
     let cover: AvatarUrl?
     let stream_url: LiveStreamURL?
     let owner: Author?
+    let webRID: String?
 
     private enum CodingKeys: String, CodingKey {
         case id_str
@@ -935,6 +936,7 @@ struct LiveRoom: Decodable {
         case cover
         case stream_url
         case owner
+        case web_rid
     }
 
     init(from decoder: Decoder) throws {
@@ -960,6 +962,22 @@ struct LiveRoom: Decodable {
         cover = try container.decodeIfPresent(AvatarUrl.self, forKey: .cover)
         stream_url = try container.decodeIfPresent(LiveStreamURL.self, forKey: .stream_url)
         owner = try container.decodeIfPresent(Author.self, forKey: .owner)
+        webRID = try container.decodeIfPresent(String.self, forKey: .web_rid) ?? owner?.web_rid
+    }
+
+    private init(copying room: LiveRoom, webRID: String) {
+        id_str = room.id_str
+        status = room.status
+        title = room.title
+        user_count = room.user_count
+        cover = room.cover
+        stream_url = room.stream_url
+        owner = room.owner
+        self.webRID = webRID
+    }
+
+    func withWebRID(_ webRID: String) -> LiveRoom {
+        LiveRoom(copying: self, webRID: webRID)
     }
 
     // 推荐/关注及 room/web/enter 返回的正式房间使用 status=2。

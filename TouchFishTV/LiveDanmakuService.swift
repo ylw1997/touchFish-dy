@@ -20,6 +20,8 @@ final class LiveDanmakuService {
     private var reconnectTask: Task<Void, Never>?
     private var generation: UInt = 0
     private var reconnectAttempt = 0
+    private var receivedFrameCount = 0
+    private var failedFrameCount = 0
     private var seenMessageIDs: Set<String> = []
     private var recentMessageIDs: [String] = []
 
@@ -37,8 +39,15 @@ final class LiveDanmakuService {
         generation &+= 1
         let requestedGeneration = generation
         reconnectAttempt = 0
+        receivedFrameCount = 0
+        failedFrameCount = 0
         seenMessageIDs.removeAll(keepingCapacity: true)
         recentMessageIDs.removeAll(keepingCapacity: true)
+        PlaybackDiagnostics.shared.event(
+            "start",
+            category: "live-danmaku",
+            fields: ["room": roomID, "webRID": webRID]
+        )
         connectTask = Task { [weak self] in
             await self?.connect(
                 roomID: roomID,
@@ -130,8 +139,27 @@ final class LiveDanmakuService {
                     case .string(let value): data = Data(value.utf8)
                     @unknown default: continue
                     }
-                    try await self.consume(data, socket: task)
-                    self.reconnectAttempt = 0
+                    do {
+                        try await self.consume(data, socket: task)
+                        self.reconnectAttempt = 0
+                    } catch {
+                        // A malformed application frame must not tear down a healthy
+                        // WebSocket; subsequent frames are independently decodable.
+                        self.failedFrameCount += 1
+                        if self.failedFrameCount == 1 || self.failedFrameCount.isMultiple(of: 20) {
+                            let decodeError = error as NSError
+                            PlaybackDiagnostics.shared.event(
+                                "frame-decode-failed",
+                                category: "live-danmaku",
+                                fields: [
+                                    "failures": self.failedFrameCount,
+                                    "bytes": data.count,
+                                    "errorType": String(describing: type(of: error)),
+                                    "errorCode": decodeError.code
+                                ]
+                            )
+                        }
+                    }
                 }
             } catch is CancellationError {
                 return
@@ -175,10 +203,25 @@ final class LiveDanmakuService {
             )
             try await socket.send(.data(ack))
         }
-        emitMessages(from: response)
+        let chatCount = emitMessages(from: response)
+        receivedFrameCount += 1
+        if receivedFrameCount == 1 || chatCount > 0 {
+            PlaybackDiagnostics.shared.event(
+                "frame-received",
+                category: "live-danmaku",
+                fields: [
+                    "frame": receivedFrameCount,
+                    "messages": response.messages.count,
+                    "chats": chatCount,
+                    "gzip": frame.payload.isGzip
+                ]
+            )
+        }
     }
 
-    private func emitMessages(from response: LivePushResponse) {
+    @discardableResult
+    private func emitMessages(from response: LivePushResponse) -> Int {
+        var emittedCount = 0
         for message in response.messages where message.method == "WebcastChatMessage" {
             guard let chat = try? LiveProtobuf.decodeChatMessage(message.payload) else { continue }
             let text = chat.content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -194,7 +237,9 @@ final class LiveDanmakuService {
                 expired.forEach { seenMessageIDs.remove($0) }
             }
             onDanmaku?(LiveDanmakuItem(id: id, nickname: chat.nickname, text: text))
+            emittedCount += 1
         }
+        return emittedCount
     }
 
     private func scheduleReconnect(
@@ -212,6 +257,7 @@ final class LiveDanmakuService {
         receiveTask = nil
         reconnectAttempt += 1
         let delay = min(30.0, pow(2.0, Double(min(reconnectAttempt - 1, 4))))
+        let networkError = error as NSError
         PlaybackDiagnostics.shared.event(
             "reconnect-scheduled",
             category: "live-danmaku",
@@ -219,7 +265,10 @@ final class LiveDanmakuService {
                 "room": roomID,
                 "attempt": reconnectAttempt,
                 "delay": delay,
-                "errorType": String(describing: type(of: error))
+                "errorType": String(describing: type(of: error)),
+                "errorDomain": networkError.domain,
+                "errorCode": networkError.code,
+                "error": networkError.localizedDescription
             ]
         )
         reconnectTask = Task { [weak self] in
@@ -258,6 +307,11 @@ final class LiveDanmakuService {
             into: cookie,
             setCookie: http.value(forHTTPHeaderField: "Set-Cookie")
         )
+        PlaybackDiagnostics.shared.event(
+            "page-context-loaded",
+            category: "live-danmaku",
+            fields: ["room": roomID, "htmlBytes": pageData.count]
+        )
         let fallback = Self.fallbackBootstrap(
             roomID: roomID,
             userUniqueID: userUniqueID,
@@ -286,6 +340,11 @@ final class LiveDanmakuService {
                   (200...299).contains(http.statusCode), !data.isEmpty else { return fallback }
             let initial = try LiveProtobuf.decodeResponse(data)
             guard !initial.cursor.isEmpty else { return fallback }
+            PlaybackDiagnostics.shared.event(
+                "bootstrap-loaded",
+                category: "live-danmaku",
+                fields: ["room": roomID, "messages": initial.messages.count]
+            )
             return LiveBootstrap(
                 userUniqueID: userUniqueID,
                 cookie: requestCookie,
@@ -295,6 +354,11 @@ final class LiveDanmakuService {
             )
         } catch {
             // fetch 的签名变化不能阻断直播播放，继续使用网页协议的首帧游标。
+            PlaybackDiagnostics.shared.event(
+                "bootstrap-fallback",
+                category: "live-danmaku",
+                fields: ["room": roomID, "errorType": String(describing: type(of: error))]
+            )
             return fallback
         }
     }
@@ -342,8 +406,7 @@ final class LiveDanmakuService {
                 name: "signature",
                 value: SignatureManager.shared.liveSignature(
                     roomID: roomID,
-                    userUniqueID: userUniqueID,
-                    userAgent: Self.userAgent
+                    userUniqueID: userUniqueID
                 )
             )
         ]
@@ -631,6 +694,13 @@ private enum Gzip {
     enum DecodeError: Error { case malformed, failed }
 
     static func decompress(_ data: Data) throws -> Data {
+        // Foundation's zlib decoder accepts the complete gzip stream and
+        // validates its header/trailer. Keep the raw-deflate path only as a
+        // compatibility fallback for older system implementations.
+        if let decoded = try? (data as NSData).decompressed(using: .zlib) {
+            return decoded as Data
+        }
+
         let payload = try deflatePayload(in: data)
         var capacity = max(64 * 1_024, payload.count * 6)
         while capacity <= 16 * 1_024 * 1_024 {

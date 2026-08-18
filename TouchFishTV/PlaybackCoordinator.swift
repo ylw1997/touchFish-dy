@@ -393,7 +393,7 @@ final class PlaybackCoordinator: ObservableObject {
         currentAwemeID = aweme.aweme_id
         if aweme.isLive,
            let room = aweme.liveRoom,
-           let webRID = room.owner?.web_rid,
+           let webRID = room.webRID ?? room.owner?.web_rid,
            !webRID.isEmpty {
             playerViewController.danmakuController.configureLive(
                 roomID: room.id_str,
