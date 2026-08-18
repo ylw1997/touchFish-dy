@@ -190,7 +190,6 @@ struct LiveLibraryView: View {
 @MainActor
 private struct LiveRoomPlaybackPage: View {
     @EnvironmentObject private var api: DouyinAPI
-    @Environment(\.dismiss) private var dismiss
     @StateObject private var playbackSlot = PlaybackSessionSlot(source: .live)
     @State private var playbackItem: Aweme?
     @State private var isLoading = false
@@ -265,9 +264,9 @@ private struct LiveRoomPlaybackPage: View {
             }
         }
         // 直播观看是全屏层。隐藏 Tab 后，上下键不会把焦点移到 TabView；
-        // 返回弹出本页时，直播列表作为上一层会自动恢复 Tab。
+        // 返回键先由 AVKit 隐藏控制栏；控制栏已经隐藏后，系统导航再返回
+        // 直播列表并自动恢复 Tab。
         .toolbar(.hidden, for: .tabBar)
-        .onExitCommand { dismiss() }
         .onDisappear { playbackSlot.deactivate() }
     }
 

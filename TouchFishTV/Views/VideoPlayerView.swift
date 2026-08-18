@@ -348,6 +348,10 @@ final class DouyinPlayerContainerViewController: UIViewController {
             guard !isPlaybackSurface else { return }
             performNavigation(.previous)
         } else if context.focusHeading.contains(.down) {
+            // Action 区域下移时，AVKit 会把焦点异步交回进度条，同时也可能
+            // 发送 movementDidFail。这里不能把同一次按键再解释成“下一条”；
+            // 只有焦点原本就在进度条/播放面时，下键才切换视频。
+            guard isPlaybackSurface else { return }
             performNavigation(.next)
         }
     }
